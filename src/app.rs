@@ -690,7 +690,7 @@ impl<'g> Reader<'g> {
         // Link-hint overlay is modal: a label opens (or copies) that link,
         // Y switches between the two, Esc cancels.
         if !self.overlays.link_hints.is_empty() {
-            self.pick_link_hint(action, terminal);
+            self.pick_link_hint(action, terminal, view);
             return Ok(None);
         }
         // Theme picker mode
@@ -757,7 +757,7 @@ impl<'g> Reader<'g> {
     }
 
     /// A key in the link-hint overlay. Anything but `Y` closes it.
-    fn pick_link_hint(&mut self, action: Action, terminal: &mut Tui) {
+    fn pick_link_hint(&mut self, action: Action, terminal: &mut Tui, view: View) {
         match action {
             Action::HintCopyToggle => {
                 self.overlays.hint_kind = HintKind::CopyUrl;
@@ -766,18 +766,9 @@ impl<'g> Reader<'g> {
                 if let Some(hint) = self.overlays.link_hints.iter().find(|h| h.label == c) {
                     match self.overlays.hint_kind {
                         HintKind::Open => {
-                            if let Some(msg) = open_link(
-                                &hint.url,
-                                &mut self.tabs,
-                                self.active_tab,
-                                &mut self.nav,
-                                &self.args,
-                                terminal,
-                                self.theme_gen,
-                                self.graphics,
-                            ) {
-                                self.flash = Some((msg, Instant::now()));
-                            }
+                            let url = hint.url.clone();
+                            self.overlays.link_hints.clear();
+                            self.follow_link(&url, terminal, view);
                         }
                         HintKind::CopyUrl => {
                             self.flash = Some((
@@ -1103,7 +1094,7 @@ impl<'g> Reader<'g> {
             // Follow the first link on screen that can be followed (web,
             // mail, a .md file or a #heading anchor), through the same
             // path as link-hint mode.
-            Action::FollowLink => self.follow_first_link(terminal, viewport_height),
+            Action::FollowLink => self.follow_first_link(terminal, view),
 
             // Navigation history
             Action::NavBack => {
@@ -1180,7 +1171,7 @@ impl<'g> Reader<'g> {
             }
             Action::MouseDown(col, row) => self.mouse_down(col, row),
             Action::MouseDrag(col, row) => self.mouse_drag(col, row),
-            Action::MouseUp(col, row) => self.mouse_up(col, row, terminal),
+            Action::MouseUp(col, row) => self.mouse_up(col, row, terminal, view),
 
             _ => {}
         }
@@ -1234,29 +1225,44 @@ impl<'g> Reader<'g> {
     }
 
     /// `Enter`: follow the first followable link on screen.
-    fn follow_first_link(&mut self, terminal: &mut Tui, viewport_height: u16) {
+    fn follow_first_link(&mut self, terminal: &mut Tui, view: View) {
         let tab = &self.tabs[self.active_tab];
-        let found_link =
-            first_followable_link(&tab.styled_lines, tab.scroll_offset, viewport_height)
-                .map(str::to_string);
+        let found_link = first_followable_link(
+            &tab.styled_lines,
+            tab.scroll_offset,
+            view.viewport_height,
+            self.args.on_link.is_some(),
+        )
+        .map(str::to_string);
         match found_link {
-            Some(link) => {
-                if let Some(msg) = open_link(
-                    &link,
-                    &mut self.tabs,
-                    self.active_tab,
-                    &mut self.nav,
-                    &self.args,
-                    terminal,
-                    self.theme_gen,
-                    self.graphics,
-                ) {
-                    self.flash = Some((msg, Instant::now()));
-                }
-            }
+            Some(link) => self.follow_link(&link, terminal, view),
             None => {
                 self.flash = Some(("no links on screen".into(), Instant::now()));
             }
+        }
+    }
+
+    /// Follow `url`, flashing why when it leads nowhere. While the
+    /// `--on-link` command runs, the status bar says it is loading.
+    fn follow_link(&mut self, url: &str, terminal: &mut Tui, view: View) {
+        let runs_command = self.args.on_link.is_some() && !url.starts_with('#');
+        if runs_command {
+            self.flash = Some((format!("loading {url}…"), Instant::now()));
+            let _ = self.draw(terminal, view);
+        }
+        if let Some(msg) = open_link(
+            url,
+            &mut self.tabs,
+            self.active_tab,
+            &mut self.nav,
+            &self.args,
+            terminal,
+            self.theme_gen,
+            self.graphics,
+        ) {
+            self.flash = Some((msg, Instant::now()));
+        } else if runs_command {
+            self.flash = None;
         }
     }
 
@@ -1371,7 +1377,7 @@ impl<'g> Reader<'g> {
 
     /// The left button came up: copy what a drag selected, or follow the
     /// link under a plain click.
-    fn mouse_up(&mut self, col: u16, row: u16, terminal: &mut Tui) {
+    fn mouse_up(&mut self, col: u16, row: u16, terminal: &mut Tui, view: View) {
         let sel = &mut self.selection;
         // Pressed and released on one cell with no drag, and not
         // the second press of a double click.
@@ -1399,18 +1405,7 @@ impl<'g> Reader<'g> {
             // The page under the pointer changes: the next press
             // is a fresh click, not the second of a double.
             self.selection.last_click = None;
-            if let Some(msg) = open_link(
-                &url,
-                &mut self.tabs,
-                self.active_tab,
-                &mut self.nav,
-                &self.args,
-                terminal,
-                self.theme_gen,
-                self.graphics,
-            ) {
-                self.flash = Some((msg, Instant::now()));
-            }
+            self.follow_link(&url, terminal, view);
         }
     }
 
@@ -2273,13 +2268,17 @@ fn link_caption(raw: &str, url: &str) -> String {
     }
 }
 
+const ON_LINK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Act on a chosen link — the one path for link-hint mode and `Enter`.
 ///
-/// Web/mail URLs open in the default handler. A local `.md` link replaces the
-/// tab in place (any readable path, same trust model as images); a `#frag`
-/// suffix then scrolls to that heading, and a bare `#frag` scrolls the
-/// current document. Every in-ink move is recorded in `nav` first, scroll
-/// position included, so `[` comes back to the exact spot.
+/// A bare `#frag` scrolls the current document. With `--on-link`, every other
+/// link goes to that command, and its stdout replaces the tab in place,
+/// titled with the URL. Without it, web/mail URLs open in the default
+/// handler, and a local `.md` link replaces the tab in place (any readable
+/// path, same trust model as images). Either way a `#frag` suffix then
+/// scrolls to that heading. Every in-ink move is recorded in `nav` first,
+/// scroll position included, so `[` comes back to the exact spot.
 ///
 /// Returns a status message to flash when the link leads nowhere.
 #[allow(clippy::too_many_arguments)]
@@ -2293,14 +2292,6 @@ fn open_link(
     gen: u32,
     graphics: &crate::graphics::Graphics,
 ) -> Option<String> {
-    // Web / mail: hand off to the OS.
-    if let Some(safe) = web_target(url) {
-        let _ = open::that_detached(&safe);
-        return None;
-    }
-    if !is_followable_local(url) {
-        return Some(format!("cannot follow {url}"));
-    }
     let size = terminal.size().ok();
     let viewport = size.map(|s| s.height.saturating_sub(3)).unwrap_or(24) as usize;
 
@@ -2312,6 +2303,45 @@ fn open_link(
         nav.record(NavEntry::of(tab));
         tab.scroll_offset = line;
         return None;
+    }
+
+    if let Some(template) = &args.on_link {
+        let Some(argv) = crate::hook::hook_argv(template, url) else {
+            return Some("on-link: the command is empty".into());
+        };
+        let src = match crate::hook::run_hook(&argv, ON_LINK_TIMEOUT) {
+            Ok(src) => src,
+            Err(reason) => return Some(format!("on-link: {reason}")),
+        };
+        nav.record(NavEntry::of(&tabs[active_tab]));
+        let tab = &mut tabs[active_tab];
+        replace_tab_keeping_toc(
+            tab,
+            src,
+            url,
+            args,
+            size.map(|s| s.width).unwrap_or(80),
+            gen,
+            graphics,
+        );
+        tab.from_link_command = true;
+        tab.mtime = None;
+        if let Some(line) = url
+            .split_once('#')
+            .and_then(|(_, fragment)| heading_scroll(tab, fragment, viewport))
+        {
+            tab.scroll_offset = line;
+        }
+        return None;
+    }
+
+    // Web / mail: hand off to the OS.
+    if let Some(safe) = web_target(url) {
+        let _ = open::that_detached(&safe);
+        return None;
+    }
+    if !is_followable_local(url) {
+        return Some(format!("cannot follow {url}"));
     }
 
     let base = std::path::Path::new(&tabs[active_tab].filename)
@@ -2354,11 +2384,13 @@ fn web_target(url: &str) -> Option<String> {
 }
 
 /// The first link `Enter` can follow among the `height` lines from
-/// `offset`: a web or mail link, or one ink follows itself.
+/// `offset`: any link with `--on-link`, otherwise a web or mail link, or one
+/// ink follows itself.
 fn first_followable_link(
     lines: &[crate::layout::StyledLine],
     offset: usize,
     height: u16,
+    on_link: bool,
 ) -> Option<&str> {
     lines
         .iter()
@@ -2366,7 +2398,7 @@ fn first_followable_link(
         .take(height as usize)
         .flat_map(|line| &line.spans)
         .filter_map(|span| span.style.link_url.as_deref())
-        .find(|url| web_target(url).is_some() || is_followable_local(url))
+        .find(|url| on_link || web_target(url).is_some() || is_followable_local(url))
 }
 
 /// Links ink follows itself: a local markdown file, optionally with a
@@ -3273,14 +3305,30 @@ mod section_tests {
         // Far below the old six-line window, but on screen.
         assert!(line > 6);
         assert_eq!(
-            first_followable_link(&t.styled_lines, 0, line as u16 + 1),
+            first_followable_link(&t.styled_lines, 0, line as u16 + 1, false),
             Some("https://example.com")
         );
         // Not on screen: nothing.
-        assert_eq!(first_followable_link(&t.styled_lines, 0, line as u16), None);
+        assert_eq!(
+            first_followable_link(&t.styled_lines, 0, line as u16, false),
+            None
+        );
         assert_eq!(web_target("mailto:a@b.c").as_deref(), Some("mailto:a@b.c"));
         assert_eq!(web_target("javascript:alert(1)"), None);
         assert_eq!(web_target("other.md"), None);
+    }
+
+    #[test]
+    fn enter_follows_any_link_with_on_link() {
+        let t = built("[page](/wiki/Rust) [site](https://example.com)\n");
+        assert_eq!(
+            first_followable_link(&t.styled_lines, 0, 1, false),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            first_followable_link(&t.styled_lines, 0, 1, true),
+            Some("/wiki/Rust")
+        );
     }
 
     #[test]
