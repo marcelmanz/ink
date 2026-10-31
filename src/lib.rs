@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod editor;
 pub mod glyphs;
 pub mod graphics;
+pub mod hook;
 pub mod highlight;
 pub mod image;
 pub mod input;
