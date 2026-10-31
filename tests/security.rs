@@ -19,6 +19,7 @@ fn args() -> Args {
         spacing: Spacing::Normal,
         mouse_capture: true,
         clipboard: ink_md::clipboard::ClipboardMode::Off,
+        on_link: None,
     }
 }
 
