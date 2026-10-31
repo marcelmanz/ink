@@ -3115,6 +3115,7 @@ mod section_tests {
             spacing: crate::Spacing::Normal,
             mouse_capture: false,
             clipboard: crate::clipboard::ClipboardMode::Auto,
+            on_link: None,
         }
     }
 

@@ -99,6 +99,12 @@ pub struct Cli {
     /// locales; `[behavior] ascii` sets it either way
     #[arg(long, global = true)]
     pub ascii: bool,
+
+    /// Hand followed links to CMD instead of opening them, and show its
+    /// stdout in place of the document. `{}` in CMD is the link URL (appended
+    /// when absent). Overrides `[behavior] on_link`
+    #[arg(long, value_name = "CMD")]
+    pub on_link: Option<String>,
 }
 
 /// How wide to lay out text: `--width` or the config file's `width`.
@@ -238,6 +244,7 @@ pub struct Args {
     pub spacing: Spacing,
     pub mouse_capture: bool,
     pub clipboard: crate::clipboard::ClipboardMode,
+    pub on_link: Option<String>,
 }
 
 /// The values `ink` uses with no flags and no config file, except that
@@ -258,6 +265,7 @@ impl Default for Args {
             spacing: Spacing::Normal,
             mouse_capture: true,
             clipboard: crate::clipboard::ClipboardMode::Auto,
+            on_link: None,
         }
     }
 }
@@ -408,6 +416,17 @@ pub fn run() -> Result<()> {
         cli.input.clone()
     };
 
+    let on_link = cli.on_link.clone().or_else(|| {
+        let behavior = user_config.as_ref()?.behavior.as_ref()?;
+        behavior.on_link.clone()
+    });
+    if on_link
+        .as_deref()
+        .is_some_and(|template| crate::hook::hook_argv(template, "").is_none())
+    {
+        anyhow::bail!("the on-link command is empty");
+    }
+
     let args = Args {
         inputs,
         theme,
@@ -431,6 +450,7 @@ pub fn run() -> Result<()> {
         spacing,
         mouse_capture: mouse_capture(cli.no_mouse, &user_config).0,
         clipboard: clipboard_mode(&user_config).0,
+        on_link,
     };
 
     // Check if input is a directory or no input with a TTY → launch file browser
@@ -754,6 +774,11 @@ pub(crate) const STARTER_CONFIG: &str = r#"# ink configuration
 # legacy console fonts, screen readers). Unset: automatic on TERM=linux and
 # non-UTF-8 locales. Same as --ascii.
 # ascii = false
+
+# Command a followed link is handed to instead of opening it; its stdout is
+# shown in place of the document. {} is the link URL (appended when absent).
+# Same as --on-link.
+# on_link = "wiki {}"
 
 [keybindings]
 # Built-in preset: "default" (vim-flavored), "vim", or "emacs"
