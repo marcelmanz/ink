@@ -31,6 +31,8 @@ struct Tab {
     /// for stdin and URL documents. Going back to a file that has changed
     /// since re-reads it.
     mtime: Option<SystemTime>,
+    /// `source` is the `--on-link` command's output for the URL in `filename`.
+    from_link_command: bool,
     /// The markdown actually parsed: frontmatter stripped, wikilinks expanded.
     /// Heading `source_line`s index into this, so `Y` slices sections from it.
     content: String,
@@ -89,6 +91,7 @@ struct NavEntry {
     filename: String,
     source: Arc<str>,
     mtime: Option<SystemTime>,
+    from_link_command: bool,
     scroll_offset: usize,
 }
 
@@ -98,6 +101,7 @@ impl NavEntry {
             filename: tab.filename.clone(),
             source: Arc::clone(&tab.source),
             mtime: tab.mtime,
+            from_link_command: tab.from_link_command,
             scroll_offset: tab.scroll_offset,
         }
     }
@@ -1442,7 +1446,8 @@ impl<'g> Reader<'g> {
             return Ok(());
         };
         let path = std::path::Path::new(input);
-        if self.tabs[self.active_tab].filename == *input && w.check(path) {
+        let tab = &self.tabs[self.active_tab];
+        if !tab.from_link_command && tab.filename == *input && w.check(path) {
             match std::fs::read_to_string(path) {
                 Ok(new_source) if self.args.slides => {
                     let deck = if self.args.frontmatter {
@@ -1878,7 +1883,9 @@ fn screen_to_doc(area: Rect, tab: &Tab, col: u16, row: u16) -> Option<Pos> {
 
 /// Why a document cannot be opened in an editor, or `None` when it can.
 fn not_editable(tab: &Tab) -> Option<String> {
-    if tab.filename == "stdin" || tab.filename == "-" {
+    if tab.from_link_command {
+        Some("nothing to edit: document came from a link command".into())
+    } else if tab.filename == "stdin" || tab.filename == "-" {
         Some("nothing to edit: document came from stdin".into())
     } else if !is_local_file(&tab.filename) {
         Some("nothing to edit: document came from a URL".into())
@@ -2088,6 +2095,7 @@ fn reload_tab(
     let toc_visible = tab.toc.visible;
     let toc_nav = std::mem::take(&mut tab.toc.nav);
     let filename = tab.filename.clone();
+    let from_link_command = tab.from_link_command;
     *tab = build_tab(
         source,
         &filename,
@@ -2096,6 +2104,7 @@ fn reload_tab(
         gen,
         graphics,
     );
+    tab.from_link_command = from_link_command;
     tab.toc.visible = toc_visible;
     tab.toc.inherit(toc_nav);
     let same_heading = heading.and_then(|(text, nth, delta)| {
@@ -2495,6 +2504,7 @@ fn restore_nav_entry(
             graphics,
         );
         tab.mtime = entry.mtime;
+        tab.from_link_command = entry.from_link_command;
     }
     tab.scroll_offset = entry
         .scroll_offset
@@ -2727,6 +2737,7 @@ fn build_tab(
         filename: filename.to_string(),
         source,
         mtime,
+        from_link_command: false,
         content,
         line_offset,
         styled_lines,
@@ -2941,6 +2952,7 @@ mod section_tests {
             filename: "t.md".into(),
             source: content.into(),
             mtime: None,
+            from_link_command: false,
             content: content.into(),
             line_offset: Some(0),
             styled_lines: Vec::new(),
@@ -3340,6 +3352,8 @@ mod section_tests {
         assert!(not_editable(&t).is_some());
         t.mtime = Some(SystemTime::now());
         assert_eq!(not_editable(&t), None);
+        t.from_link_command = true;
+        assert!(not_editable(&t).unwrap().contains("link command"));
     }
 
     #[test]
@@ -3415,6 +3429,7 @@ mod section_tests {
                 filename: "b.md".into(),
                 source: Arc::from("# B\n\nbody"),
                 mtime: None,
+                from_link_command: false,
                 scroll_offset: 0,
             };
             restore_nav_entry(&mut tab, entry, &args, 120, 0, &graphics);
@@ -3558,6 +3573,7 @@ mod section_tests {
             filename: name.into(),
             source: format!("# {name}").into(),
             mtime: None,
+            from_link_command: false,
             scroll_offset: scroll,
         }
     }
@@ -3660,5 +3676,23 @@ mod section_tests {
         assert_eq!(e.filename, "stdin");
         assert_eq!(&*e.source, DOC);
         assert_eq!(e.scroll_offset, 7);
+    }
+
+    #[test]
+    fn link_command_origin_survives_rebuilds_and_history() {
+        let args = test_args();
+        let graphics = crate::graphics::Graphics::halfblocks();
+        let mut t = built("# Page
+");
+        t.filename = "/wiki/Page".into();
+        t.from_link_command = true;
+        rebuild_tab(&mut t, &args, 120, 24, 1, &graphics);
+        assert!(t.from_link_command, "re-layout");
+
+        let back = NavEntry::of(&t);
+        restore_nav_entry(&mut t, entry("a.md", 0), &args, 80, 0, &graphics);
+        assert!(!t.from_link_command);
+        restore_nav_entry(&mut t, back, &args, 80, 0, &graphics);
+        assert!(t.from_link_command, "history");
     }
 }
