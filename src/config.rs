@@ -29,6 +29,8 @@ pub struct BehaviorConfig {
     /// Draw borders, bullets and markers with 7-bit ASCII. Unset: automatic
     /// (on for the Linux console and non-UTF-8 locales).
     pub ascii: Option<bool>,
+    /// Command a followed link is handed to; its stdout replaces the document.
+    pub on_link: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +220,7 @@ pub fn parse_config(content: &str, path: &str) -> ConfigLoad {
             mouse_capture: w.take(&mut t, "behavior.", "mouse_capture"),
             clipboard: w.take(&mut t, "behavior.", "clipboard"),
             ascii: w.take(&mut t, "behavior.", "ascii"),
+            on_link: w.take(&mut t, "behavior.", "on_link"),
         });
         w.unknown(&t, "behavior.");
     }
